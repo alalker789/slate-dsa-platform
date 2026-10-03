@@ -1,0 +1,39 @@
+# One command:  docker compose up --build --scale api=3
+# Then open http://localhost:8080
+services:
+  mongo:
+    image: mongo:7
+    volumes: [mongo-data:/data/db]
+    healthcheck: { test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"], interval: 10s, timeout: 5s, retries: 5 }
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+
+  seed:                       # idempotent: loads algorithms + flashcards and builds indexes, then exits
+    build: ./server
+    command: ["node", "src/seed/seed.js"]
+    environment: &api-env
+      MONGO_URI: mongodb://mongo:27017/slate
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:?copy .env.example to .env and set JWT_SECRET}
+      CLIENT_ORIGIN: ${CLIENT_ORIGIN:-http://localhost:8080}
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
+    depends_on: { mongo: { condition: service_healthy } }
+
+  api:                        # stateless -> scale freely with --scale api=N
+    build: ./server
+    environment: *api-env
+    depends_on:
+      seed: { condition: service_completed_successfully }
+      redis: { condition: service_started }
+    restart: unless-stopped
+
+  web:                        # nginx: static React build + load balancer for api/websockets
+    build: ./client
+    ports: ["8080:80"]
+    depends_on: [api]
+    restart: unless-stopped
+
+volumes:
+  mongo-data:
